@@ -235,14 +235,16 @@ def _(mo):
         total variance, the **isotropic Gaussian uniquely minimizes worst-case
         downstream risk** for linear tasks.
 
-        The intuition: if you don't know what downstream task will use your
-        embeddings, you want information spread equally across all dimensions.
-        Any anisotropy creates weak directions that an adversarial task could exploit.
+        The intuition is geometric. A linear probe's accuracy in any direction
+        depends on how much variance the embeddings carry in that direction.
+        Directions with low variance = weak signal = easy to exploit.
 
-        **Try it yourself.** Change the embedding dimension and distribution below.
-        We fit 200 random linear classifiers on each distribution and measure how
-        often they succeed. The isotropic Gaussian's *worst case* is better than
-        everyone else's:
+        The **eigenvalue spectrum** of the covariance matrix shows how variance is
+        distributed. A flat spectrum means equal signal in every direction. A steep
+        spectrum means some directions are strong and others are dead.
+
+        **The isotropic Gaussian has the flattest possible spectrum.** Any other
+        distribution wastes variance on some directions at the expense of others.
         """
     )
     return
@@ -256,38 +258,28 @@ def _(mo):
 
 
 @app.cell
-def _(BLUE, GREEN, ORANGE, PURPLE, RED, dim_pick, mo, np, plt):
+def _(GREEN, ORANGE, PURPLE, RED, dim_pick, mo, np, plt):
     _d = dim_pick.value
-    _n, _n_tasks = 300, 200
+    _n = 500
     _rng = np.random.RandomState(0)
 
+    # Generate four distributions, all with ~same total variance
     def _make(kind, rng, n, d):
         if kind == "isotropic":
             return rng.randn(n, d)
         elif kind == "anisotropic":
             s = np.exp(np.linspace(1, -2, d))
-            return rng.randn(n, d) * (s / np.sqrt(np.mean(s**2)))
+            s = s * np.sqrt(d) / np.linalg.norm(s)
+            return rng.randn(n, d) * s
         elif kind == "rank_def":
-            k = max(1, d // 3)
-            e = rng.randn(n, k) @ rng.randn(k, d)
-            return e / (np.std(e) + 1e-8)
+            e = rng.randn(n, d)
+            kill = max(1, d // 2)
+            e[:, d - kill:] *= 0.05
+            e = e * np.sqrt(d) / (np.std(e) * np.sqrt(d) + 1e-8)
+            return e
         elif kind == "uniform":
             e = rng.uniform(-1, 1, (n, d))
             return e / (np.std(e) + 1e-8)
-
-    def _probe(emb, rng, n_tasks):
-        accs = []
-        for _ in range(n_tasks):
-            w = rng.randn(emb.shape[1])
-            w /= np.linalg.norm(w)
-            y = (emb @ w > 0).astype(float)
-            h = len(emb) // 2
-            try:
-                w_h = np.linalg.lstsq(emb[:h], y[:h] * 2 - 1, rcond=None)[0]
-                accs.append(np.mean((emb[h:] @ w_h > 0) == y[h:].astype(bool)))
-            except Exception:
-                accs.append(0.5)
-        return np.array(accs)
 
     _types = [
         ("Isotropic\nGaussian", "isotropic", GREEN),
@@ -296,43 +288,57 @@ def _(BLUE, GREEN, ORANGE, PURPLE, RED, dim_pick, mo, np, plt):
         ("Uniform", "uniform", PURPLE),
     ]
 
-    fig2, (ax_hist, ax_bar) = plt.subplots(1, 2, figsize=(12, 4))
+    fig2, axes2 = plt.subplots(1, 4, figsize=(14, 3.5), sharey=True)
 
-    _worst = []
-    for _label, _kind, _color in _types:
+    _min_eigs = []
+    for _idx, (_label, _kind, _color) in enumerate(_types):
         _emb = _make(_kind, _rng, _n, _d)
-        _a = _probe(_emb, _rng, _n_tasks)
-        ax_hist.hist(_a, bins=20, alpha=0.45, color=_color, label=_label.replace("\n", " "),
-                     range=(0.4, 1.0), density=True)
-        _worst.append(np.percentile(_a, 5))
+        _cov = np.cov(_emb.T)
+        _eigs = np.sort(np.linalg.eigvalsh(_cov))[::-1]
+        _min_eigs.append(_eigs[-1])
 
-    ax_hist.set_xlabel("Probe accuracy")
-    ax_hist.set_ylabel("Density")
-    ax_hist.set_title("Accuracy across 200 random tasks", fontweight="bold")
-    ax_hist.legend(fontsize=8)
+        _ax = axes2[_idx]
+        _bars = _ax.bar(range(_d), _eigs, color=_color, alpha=0.7,
+                       edgecolor="white", linewidth=0.5)
 
-    _bars = ax_bar.bar(
-        [t[0] for t in _types], _worst,
-        color=[t[2] for t in _types], alpha=0.8, edgecolor="white", linewidth=1.5
+        # Highlight smallest eigenvalue
+        _bars[-1].set_edgecolor("black")
+        _bars[-1].set_linewidth(2)
+
+        _ax.set_title(_label, fontsize=10, fontweight="bold")
+        _ax.set_xlabel("Dimension")
+        if _idx == 0:
+            _ax.set_ylabel("Eigenvalue\n(variance in that direction)")
+
+        # Annotate min eigenvalue
+        _me = _eigs[-1]
+        _ax.text(
+            _d - 1, _me + _ax.get_ylim()[1] * 0.05,
+            f"min: {_me:.3f}", fontsize=8, ha="right",
+            fontweight="bold", color="black",
+            bbox=dict(boxstyle="round,pad=0.2", fc="white", ec="black", alpha=0.8),
+        )
+
+    fig2.suptitle(
+        "Eigenvalue spectrum: how is variance distributed across dimensions?",
+        fontsize=12, fontweight="bold", y=1.03,
     )
-    for _b, _v in zip(_bars, _worst):
-        ax_bar.text(_b.get_x() + _b.get_width()/2, _v + 0.008, f"{_v:.2f}",
-                    ha="center", fontsize=11, fontweight="bold")
-    ax_bar.set_ylabel("Worst-case accuracy (5th percentile)")
-    ax_bar.set_title("Who survives the hardest task?", fontweight="bold")
-    ax_bar.set_ylim(0.4, 1.0)
-
     plt.tight_layout()
 
-    _winner = "Isotropic Gaussian" if _worst[0] >= max(_worst) - 0.01 else _types[np.argmax(_worst)][0]
+    _best_idx = np.argmax(_min_eigs)
+    _best_name = _types[_best_idx][0].replace("\n", " ")
     mo.vstack([
         fig2,
         mo.callout(
-            mo.md(f"**The isotropic Gaussian wins.** Its worst-case accuracy ({_worst[0]:.2f}) "
-                  f"is the best floor. No matter what downstream task you throw at it, "
-                  f"it has no weak directions to exploit."),
-            kind="success"
-        )
+            mo.md(
+                f"**{_best_name} has the highest minimum eigenvalue ({_min_eigs[_best_idx]:.3f}).**"
+                f" Its variance is spread most equally across all dimensions, "
+                f"leaving no weak directions for a downstream task to exploit. "
+                f"The rank-deficient distribution's smallest eigenvalue ({_min_eigs[2]:.4f}) "
+                f"means some directions carry almost zero signal."
+            ),
+            kind="success",
+        ),
     ])
     return
 
@@ -615,22 +621,22 @@ def _(BLUE, GREEN, RED, epoch_slider, mo, np, plt, precomputed):
         except Exception:
             _p2 = _dc[:, :2]
 
-        ax = axes4[_col]
+        _ax = axes4[_col]
         _lim = max(np.abs(_p2).max() * 1.3, 0.3)
-        ax.scatter(_p2[:, 0], _p2[:, 1], c=_labels, cmap="Set2", alpha=0.6, s=15,
+        _ax.scatter(_p2[:, 0], _p2[:, 1], c=_labels, cmap="Set2", alpha=0.6, s=15,
                    edgecolors="white", linewidth=0.3)
-        ax.set_xlim(-_lim, _lim); ax.set_ylim(-_lim, _lim); ax.set_aspect("equal")
-        ax.set_title(_title, fontsize=12, fontweight="bold", color=_border_color)
+        _ax.set_xlim(-_lim, _lim); _ax.set_ylim(-_lim, _lim); _ax.set_aspect("equal")
+        _ax.set_title(_title, fontsize=12, fontweight="bold", color=_border_color)
 
         _r = _ranks[_ep]
         _rc = GREEN if _r > 4 else (RED if _r < 2.5 else "#555")
-        ax.text(0.05, 0.95, f"eff. rank: {_r:.1f} / 12",
-                transform=ax.transAxes, va="top", fontsize=11, fontweight="bold",
+        _ax.text(0.05, 0.95, f"eff. rank: {_r:.1f} / 12",
+                transform=_ax.transAxes, va="top", fontsize=11, fontweight="bold",
                 color=_rc,
                 bbox=dict(boxstyle="round,pad=0.3", fc="white", ec=_rc, alpha=0.85))
 
         # Border
-        for spine in ax.spines.values():
+        for spine in _ax.spines.values():
             spine.set_edgecolor(_border_color)
             spine.set_linewidth(2)
             spine.set_visible(True)
