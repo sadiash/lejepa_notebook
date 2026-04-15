@@ -137,9 +137,12 @@ def _(collapse_slider, np, plt):
         # Show effective rank
         _cov = np.cov(_data.T)
         _eigvals = np.linalg.eigvalsh(_cov)
-        _eigvals = np.maximum(_eigvals, 1e-12)
-        _p = _eigvals / _eigvals.sum()
-        _eff_rank = np.exp(-np.sum(_p * np.log(_p + 1e-12)))
+        _total_var = _eigvals.sum()
+        if _total_var < 1e-8:
+            _eff_rank = 0.0
+        else:
+            _p = _eigvals / _total_var
+            _eff_rank = np.exp(-np.sum(_p * np.log(_p + 1e-12)))
         _ax.text(
             0.05, 0.95, f"eff. rank: {_eff_rank:.2f}/2",
             transform=_ax.transAxes, fontsize=9, va="top",
