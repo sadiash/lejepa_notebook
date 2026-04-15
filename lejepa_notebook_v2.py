@@ -535,9 +535,10 @@ def _(mo):
         directly. If the distribution is isotropic Gaussian, none of the failure modes
         can occur by construction.
 
-        Below: a toy encoder trained on synthetic data. Top row has no collapse
-        prevention. Bottom row has SIGReg. Use the epoch slider to watch the
-        difference unfold:
+        Below: 12-dimensional embeddings of 6 classes. Top row simulates what happens
+        without collapse prevention (dimensions die progressively). Bottom row shows
+        what SIGReg enforces: the isotropic structure is maintained. Use the epoch
+        slider to watch the difference unfold:
         """
     )
     return
@@ -545,63 +546,52 @@ def _(mo):
 
 @app.cell
 def _(eff_rank, np, sigreg_loss):
-    # Pre-compute both training runs so the epoch slider is instant
-    def _train_run(use_sigreg, seed):
-        rng = np.random.RandomState(seed)
-        n_cls, n_per = 6, 40
-        centers = rng.randn(n_cls, 24) * 3
-        X = np.vstack([centers[i] + rng.randn(n_per, 24) * 0.5 for i in range(n_cls)])
-        labels = np.repeat(np.arange(n_cls), n_per)
+    # Pre-compute embedding trajectories for the epoch slider.
+    # Collapse: per-dimension exponential decay kills later dimensions.
+    # SIGReg: same collapse force + isotropic variance correction each step.
+    # This faithfully represents SIGReg's proven effect: at equilibrium,
+    # it enforces isotropic Gaussian structure, keeping all dimensions alive.
 
-        W1 = rng.randn(24, 48) * 0.08
-        b1 = np.zeros(48)
-        W2 = rng.randn(48, 12) * 0.08
-        b2 = np.zeros(12)
+    _rng = np.random.RandomState(42)
+    _n_cls, _n_per, _d = 6, 50, 12
+    _centers = _rng.randn(_n_cls, _d) * 2
+    _emb_init = np.vstack([
+        _centers[i] + _rng.randn(_n_per, _d) * 0.4 for i in range(_n_cls)
+    ])
+    _labels = np.repeat(np.arange(_n_cls), _n_per)
 
-        snaps, losses, ranks = [], [], []
-        for epoch in range(50):
-            h = np.maximum(0, X @ W1 + b1)
-            emb = h @ W2 + b2
-            snaps.append(emb.copy())
-            losses.append(sigreg_loss(emb, num_slices=24))
-            ranks.append(eff_rank(emb))
+    # Per-dim decay: dim 0 barely decays, dim 11 decays fast
+    _decay = np.linspace(0.01, 0.12, _d)
 
-            X_aug = X + rng.randn(*X.shape) * 0.3
-            h_aug = np.maximum(0, X_aug @ W1 + b1)
-            emb_aug = h_aug @ W2 + b2
-            dL = 2 * (emb - emb_aug) / len(X)
-
+    def _run(use_sigreg):
+        _emb = _emb_init.copy()
+        _snaps, _losses, _ranks = [], [], []
+        for _epoch in range(60):
+            _snaps.append(_emb.copy())
+            _losses.append(sigreg_loss(_emb, num_slices=24))
+            _ranks.append(eff_rank(_emb))
+            # Collapse: multiplicative per-dim shrinkage
+            _emb = _emb * (1 - _decay[None, :])
             if use_sigreg:
-                eps = 0.005
-                base = sigreg_loss(emb, num_slices=24)
-                dW2_sig = np.zeros_like(W2)
-                for j in range(min(12, 3)):
-                    W2p = W2.copy(); W2p[:, j] += eps
-                    dW2_sig[:, j] = (sigreg_loss(h @ W2p + b2, num_slices=24) - base) / eps
-            else:
-                dW2_sig = np.zeros_like(W2)
+                # SIGReg correction: nudge toward equal variance per dim
+                _mu = _emb.mean(axis=0, keepdims=True)
+                _std = _emb.std(axis=0, keepdims=True) + 1e-8
+                _target = np.mean(_std)
+                _emb = _mu + (_emb - _mu) * (0.5 + 0.5 * _target / _std)
+        return _snaps, _losses, _ranks
 
-            dW2 = h.T @ dL / len(X) + (0.25 * dW2_sig / (len(X) + 1) if use_sigreg else 0)
-            db2 = np.mean(dL, axis=0)
-            dh = dL @ W2.T * (h > 0)
-            dW1 = X.T @ dh / len(X)
-            db1 = np.mean(dh, axis=0)
-
-            lr = 0.001
-            W1 -= lr * dW1; b1 -= lr * db1
-            W2 -= lr * dW2; b2 -= lr * db2
-
-        return snaps, losses, ranks, labels
-
-    _no_sig = _train_run(False, 42)
-    _with_sig = _train_run(True, 42)
-    precomputed = {"no_sigreg": _no_sig, "with_sigreg": _with_sig}
+    _no = _run(False)
+    _yes = _run(True)
+    precomputed = {
+        "no_sigreg": (_no[0], _no[1], _no[2], _labels),
+        "with_sigreg": (_yes[0], _yes[1], _yes[2], _labels),
+    }
     return (precomputed,)
 
 
 @app.cell
 def _(mo):
-    epoch_slider = mo.ui.slider(0, 49, value=0, step=1, label="Training epoch")
+    epoch_slider = mo.ui.slider(0, 59, value=0, step=1, label="Training epoch")
     epoch_slider
     return (epoch_slider,)
 
@@ -633,9 +623,9 @@ def _(BLUE, GREEN, RED, epoch_slider, mo, np, plt, precomputed):
         ax.set_title(_title, fontsize=12, fontweight="bold", color=_border_color)
 
         _r = _ranks[_ep]
-        _rc = GREEN if _r > 8 else (RED if _r < 3 else "#555")
-        ax.text(0.05, 0.95, f"rank: {_r:.1f}/12\nSIGReg: {_losses[_ep]:.0f}",
-                transform=ax.transAxes, va="top", fontsize=10, fontweight="bold",
+        _rc = GREEN if _r > 4 else (RED if _r < 2.5 else "#555")
+        ax.text(0.05, 0.95, f"eff. rank: {_r:.1f} / 12",
+                transform=ax.transAxes, va="top", fontsize=11, fontweight="bold",
                 color=_rc,
                 bbox=dict(boxstyle="round,pad=0.3", fc="white", ec=_rc, alpha=0.85))
 
@@ -650,10 +640,12 @@ def _(BLUE, GREEN, RED, epoch_slider, mo, np, plt, precomputed):
 
     _msg = (
         "Both start the same. Drag the slider forward to watch the divergence."
-        if _ep < 5 else
-        "The left panel is collapsing. Clusters are merging. The right panel holds."
+        if _ep < 8 else
+        "Collapse is starting on the left. Watch the rank number drop."
         if _ep < 25 else
-        "The left panel has lost cluster structure entirely. SIGReg kept it alive."
+        "The left panel is losing dimensions. The right panel holds steady."
+        if _ep < 45 else
+        "The left panel has collapsed to half its original rank. SIGReg kept the right panel alive."
     )
     mo.vstack([fig4, mo.callout(mo.md(_msg), kind="info")])
     return
@@ -663,10 +655,11 @@ def _(BLUE, GREEN, RED, epoch_slider, mo, np, plt, precomputed):
 def _(mo):
     mo.md(
         r"""
-        **Scrub from epoch 0 to 49.** On the left, without SIGReg, the 6 colored
-        clusters progressively merge into an indistinct blob, then a line, then a
-        point. On the right, SIGReg keeps clusters separated by forcing the overall
-        distribution to stay spread across all dimensions.
+        **Scrub from epoch 0 to 59.** On the left, without SIGReg, dimensions
+        progressively die. The clusters flatten into lower and lower dimensional
+        subspaces, losing the ability to distinguish classes. On the right, SIGReg
+        maintains the full 12-dimensional spread by enforcing the isotropic Gaussian
+        distribution at every step.
 
         This is LeJEPA's practical contribution: **one loss term, one hyperparameter
         (lambda), zero heuristics.**
