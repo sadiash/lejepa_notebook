@@ -515,7 +515,7 @@ def _(mo):
             "Uniform": "uniform",
             "Heavy-tailed (Cauchy)": "cauchy",
         },
-        value="iso",
+        value="Isotropic Gaussian",
         label="Distribution"
     )
     mo.md(f"**Choose distribution:** {cf_dist_dropdown}")
@@ -900,7 +900,7 @@ def _(mo):
             "Latent variance": "var",
             "Cosine similarity to clean": "cos",
         },
-        value="pred",
+        value="Prediction loss",
         label="Metric to display"
     )
     mo.md(f"**Select metric:** {metric_dropdown}")
